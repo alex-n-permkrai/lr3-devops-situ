@@ -1,0 +1,57 @@
+---
+# Название и цель плейбука
+- name: Scan port 80 on remote targets using NMAP
+  # Выполняется на хостах группы 'target'
+  hosts: target
+  # Требуем повышенные привилегии (sudo) для установки пакетов и чтения файлов
+  become: yes
+  # Переменная, хранящая путь к файлу со списком целей на целевом хосте
+  vars:
+    targets_file: /tmp/targets.txt
+
+  tasks:
+    # 1. Копируем файл targets.txt с управляющей машины на целевой хост
+    - name: Copy targets list from control node to target host
+      copy:
+        src: targets.txt               # локальный файл в директории с плейбуком
+        dest: "{{ targets_file }}"     # путь на удалённой машине
+        mode: '0644'
+
+    # 2. Устанавливаем сканер NMAP через системный пакетный менеджер
+    - name: Install NMAP package
+      package:                         # работает для apt/yum/dnf и т.д.
+        name: nmap
+        state: present
+
+    # 3. Читаем содержимое файла с целями (кодировка base64)
+    - name: Read contents of targets file
+      slurp:                           # модуль slurp читает файлы на удалённом хосте
+        src: "{{ targets_file }}"
+      register: targets_content        # сохраняем результат в переменную
+
+    # 4. Преобразуем содержимое из base64 в текст и разбиваем на строки
+    - name: Convert file content into a list of targets
+      set_fact:
+        targets_list: "{{ targets_content['content'] | b64decode | split('\n') | select | map('trim') | list }}"
+        # b64decode    - декодирует из base64
+        # split('\n')  - делит на строки
+        # select       - убирает пустые строки
+        # map('trim')  - удаляет лишние пробелы по краям
+        # list         - превращает в список Ansible
+
+    # 5. Запускаем NMAP для каждого элемента списка целей (только порт 80)
+    - name: Run NMAP scan on each target (port 80 only)
+      command: "nmap -p 80 {{ item }}"   # команда сканирования
+      register: scan_results             # сохраняем вывод каждой итерации
+      loop: "{{ targets_list }}"         # перебираем все цели
+      ignore_errors: yes                 # не прерывать плейбук при ошибке сканирования
+
+    # 6. Выводим результаты на экран в удобочитаемом виде
+    - name: Display scan results for each target
+      debug:
+        msg: |
+          Target: {{ item.item }}
+          Output:
+          {{ item.stdout_lines | to_nice_yaml(indent=2) }}
+      loop: "{{ scan_results.results }}" # перебираем результаты каждой итерации
+      when: item.stdout is defined       # выводим только если есть вывод nmap
